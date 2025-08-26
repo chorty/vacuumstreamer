@@ -18,9 +18,9 @@ Copy the `vacuumstreamer.so`, `video_monitor`, and configuration files to the va
 
 ```bash
 ssh root@${VACUUM_ROBOT_IP} "mkdir -p /data/vacuumstreamer"
-scp vacuumstreamer.so root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/vacuumstreamer.so
-scp dist/usr/bin/video_monitor root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/video_monitor
-scp -r dist/ava/conf/video_monitor/ root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/ava_conf_video_monitor
+scp -O vacuumstreamer.so root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/vacuumstreamer.so
+scp -O dist/usr/bin/video_monitor root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/video_monitor
+scp -Or dist/ava/conf/video_monitor/ root@${VACUUM_ROBOT_IP}:/data/vacuumstreamer/ava_conf_video_monitor
 ```
 
 ## Install go2rtc
