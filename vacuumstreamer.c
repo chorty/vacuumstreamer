@@ -2162,9 +2162,9 @@ void ahpl_tcp_resolve_host_async(void) {
     assert(0);
 }
 
-void agora_rtc_send_audio_data(void) {
-    printf("-------------------- agora_rtc_send_audio_data --------------------\n");
-    assert(0);
+int agora_rtc_send_audio_data(void* isnull, int streamid, const void *data_ptr, size_t data_len, audio_frame_info_t *info_ptr){
+    // no-op: audio is captured directly via arecord + tcpsvd
+    return 0;
 }
 
 void ahpl_so_register(void) {
