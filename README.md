@@ -13,7 +13,10 @@ Tested on: Dreame L10s Ultra (Allwinner MR813/sun50iw10, ARM64, Athena Linux).
 - **Two-way audio** — Talk through the vacuum speaker via WebRTC backchannel
 - **Text-to-speech** — Google TTS HTTP endpoint, speak any text through the vacuum
 - **Volume control** — Speaker and microphone volume via HTTP API
-- **Home Assistant integration** — WebRTC camera card with volume sliders, TTS input, and action buttons
+- **Vacuum controls** — Start/stop/pause/home, operation mode, fan speed, water usage
+- **Manual driving** — Remote-control the vacuum with velocity/angle commands
+- **Room cleaning** — Clean specific rooms by segment ID
+- **Home Assistant integration** — Full dashboard with camera, D-pad driving controls, mode/speed selectors, TTS, and volume
 
 ## Architecture
 
@@ -27,6 +30,7 @@ video_monitor → vacuumstreamer.so (LD_PRELOAD) → TCP :6969 → go2rtc → We
 tcpsvd :6971 → tts_handler.sh → Google TTS → ffmpeg → aplay → speaker
                                → ogg123 → dmr_player → speaker
                                → amixer (volume control)
+                               → Valetudo API proxy (controls, status, drive)
 ```
 
 ## Build
@@ -132,6 +136,22 @@ The `tts_handler.sh` script runs via `tcpsvd` on port 6971 and provides:
 | `/volume/N` | GET | Set speaker volume (0–100) |
 | `/mic_volume` | GET | Get mic gain as JSON: `{"mic_volume":61,"raw":19}` |
 | `/mic_volume/N` | GET | Set mic gain (0–100) |
+| `/status` | GET | Get vacuum state (status, battery, mode, fan speed, water usage) |
+| `/start` | GET | Start cleaning |
+| `/stop` | GET | Stop cleaning |
+| `/pause` | GET | Pause cleaning |
+| `/home` | GET | Return to dock |
+| `/mode` | GET | Get current operation mode |
+| `/mode/MODE` | GET | Set mode: `vacuum`, `mop`, `vacuum_and_mop` |
+| `/fan_speed` | GET | Get current fan speed |
+| `/fan_speed/SPEED` | GET | Set fan speed: `low`, `medium`, `high`, `max` |
+| `/water_usage` | GET | Get current water usage level |
+| `/water_usage/LEVEL` | GET | Set water usage: `min`, `low`, `medium`, `high`, `max` |
+| `/drive/enable` | GET | Enable manual driving mode |
+| `/drive/disable` | GET | Disable manual driving mode |
+| `/drive/move` | POST | Move vacuum. Body: `{"velocity": -1..1, "angle": -180..180}` |
+| `/segments` | GET | List map segments (rooms) |
+| `/segments/clean` | POST | Clean rooms. Body: `{"segment_ids": ["1","2"], "iterations": 1}` |
 
 ### Examples
 
@@ -147,6 +167,20 @@ curl http://192.168.1.31:6971/volume
 
 # Play locate sound
 curl http://192.168.1.31:6971/test
+
+# Start cleaning
+curl http://192.168.1.31:6971/start
+
+# Set to mop mode
+curl http://192.168.1.31:6971/mode/mop
+
+# Manual drive: move forward
+curl http://192.168.1.31:6971/drive/enable
+curl -X POST -d '{"velocity": 0.3, "angle": 0}' http://192.168.1.31:6971/drive/move
+curl http://192.168.1.31:6971/drive/disable
+
+# Clean specific rooms
+curl -X POST -d '{"segment_ids": ["3","4"], "iterations": 1}' http://192.168.1.31:6971/segments/clean
 ```
 
 ## Home Assistant Integration
@@ -164,11 +198,11 @@ Add a Generic Camera integration in HA with:
 
 ### configuration.yaml
 
-Add the following to your Home Assistant `configuration.yaml`:
+Add the following to your Home Assistant `configuration.yaml` (replace `192.168.1.31` with your vacuum IP):
 
 ```yaml
-# REST commands for vacuum audio control
 rest_command:
+  # --- Audio Commands ---
   vacuum_say:
     url: "http://192.168.1.31:6971/say"
     method: POST
@@ -179,74 +213,189 @@ rest_command:
   vacuum_set_volume:
     url: "http://192.168.1.31:6971/volume/{{ volume }}"
     method: GET
-    timeout: 10
 
   vacuum_set_mic_volume:
     url: "http://192.168.1.31:6971/mic_volume/{{ volume }}"
     method: GET
-    timeout: 10
 
   vacuum_test_sound:
     url: "http://192.168.1.31:6971/test"
     method: GET
-    timeout: 10
 
   vacuum_play_ogg:
     url: "http://192.168.1.31:6971/play_ogg"
     method: POST
     content_type: "text/plain"
-    payload: "{{ filepath }}"
-    timeout: 10
+    payload: "{{ ogg_path }}"
 
-# Sensors to read current volume levels
+  # --- Vacuum Control Commands ---
+  vacuum_start:
+    url: "http://192.168.1.31:6971/start"
+    method: GET
+
+  vacuum_stop:
+    url: "http://192.168.1.31:6971/stop"
+    method: GET
+
+  vacuum_pause:
+    url: "http://192.168.1.31:6971/pause"
+    method: GET
+
+  vacuum_home:
+    url: "http://192.168.1.31:6971/home"
+    method: GET
+
+  vacuum_set_mode:
+    url: "http://192.168.1.31:6971/mode/{{ mode }}"
+    method: GET
+
+  vacuum_set_fan_speed:
+    url: "http://192.168.1.31:6971/fan_speed/{{ speed }}"
+    method: GET
+
+  vacuum_set_water_usage:
+    url: "http://192.168.1.31:6971/water_usage/{{ level }}"
+    method: GET
+
+  # --- Manual Drive Commands ---
+  vacuum_drive_enable:
+    url: "http://192.168.1.31:6971/drive/enable"
+    method: GET
+
+  vacuum_drive_disable:
+    url: "http://192.168.1.31:6971/drive/disable"
+    method: GET
+
+  vacuum_drive_move:
+    url: "http://192.168.1.31:6971/drive/move"
+    method: POST
+    content_type: "application/json"
+    payload: >-
+      {"velocity": {{ velocity }}, "angle": {{ angle }}}
+
+  # --- Room Cleaning ---
+  vacuum_clean_segments:
+    url: "http://192.168.1.31:6971/segments/clean"
+    method: POST
+    content_type: "application/json"
+    payload: >-
+      {"segment_ids": {{ segment_ids }}, "iterations": {{ iterations | default(1) }}}
+
+# Sensors
 sensor:
   - platform: rest
     name: Vacuum Speaker Volume
     resource: "http://192.168.1.31:6971/volume"
     value_template: "{{ value_json.volume }}"
-    scan_interval: 30
+    unit_of_measurement: "%"
+    scan_interval: 60
 
   - platform: rest
     name: Vacuum Mic Volume
     resource: "http://192.168.1.31:6971/mic_volume"
     value_template: "{{ value_json.mic_volume }}"
+    unit_of_measurement: "%"
+    scan_interval: 60
+
+  - platform: rest
+    name: Vacuum Status
+    resource: "http://192.168.1.31:6971/status"
+    value_template: >-
+      {% for attr in value_json if attr.__class == "StatusStateAttribute" %}{{ attr.value }}{% endfor %}
     scan_interval: 30
 
-# Input controls for the dashboard
+  - platform: rest
+    name: Vacuum Battery
+    resource: "http://192.168.1.31:6971/status"
+    device_class: battery
+    unit_of_measurement: "%"
+    value_template: >-
+      {% for attr in value_json if attr.__class == "BatteryStateAttribute" %}{{ attr.level }}{% endfor %}
+    scan_interval: 60
+
+  - platform: rest
+    name: Vacuum Mode
+    resource: "http://192.168.1.31:6971/mode"
+    value_template: "{{ value_json.mode }}"
+    scan_interval: 30
+
+  - platform: rest
+    name: Vacuum Fan Speed
+    resource: "http://192.168.1.31:6971/fan_speed"
+    value_template: "{{ value_json.fan_speed }}"
+    scan_interval: 30
+
+  - platform: rest
+    name: Vacuum Water Usage
+    resource: "http://192.168.1.31:6971/water_usage"
+    value_template: "{{ value_json.water_usage }}"
+    scan_interval: 30
+
+# Input controls
 input_number:
   vacuum_speaker_volume:
     name: Vacuum Speaker Volume
     min: 0
     max: 100
-    step: 1
+    step: 5
     icon: mdi:volume-high
+    unit_of_measurement: "%"
 
   vacuum_mic_volume:
     name: Vacuum Mic Volume
     min: 0
     max: 100
-    step: 1
+    step: 5
     icon: mdi:microphone
+    unit_of_measurement: "%"
 
 input_text:
   vacuum_tts_message:
     name: Vacuum TTS Message
-    max: 255
+    max: 200
     icon: mdi:message-text
 
-# Scripts for TTS
+input_select:
+  vacuum_mode:
+    name: Vacuum Mode
+    options:
+      - vacuum
+      - mop
+      - vacuum_and_mop
+    icon: mdi:robot-vacuum
+
+  vacuum_fan_speed:
+    name: Vacuum Fan Speed
+    options:
+      - low
+      - medium
+      - high
+      - max
+    icon: mdi:fan
+
+  vacuum_water_usage:
+    name: Vacuum Water Usage
+    options:
+      - min
+      - low
+      - medium
+      - high
+      - max
+    icon: mdi:water
+
+# Scripts
 script:
   vacuum_speak:
     alias: Vacuum Speak
     sequence:
-      - service: rest_command.vacuum_say
+      - action: rest_command.vacuum_say
         data:
           message: "{{ message }}"
 
   vacuum_speak_from_input:
     alias: Vacuum Speak From Input
     sequence:
-      - service: rest_command.vacuum_say
+      - action: rest_command.vacuum_say
         data:
           message: "{{ states('input_text.vacuum_tts_message') }}"
 ```
@@ -255,15 +404,18 @@ script:
 
 Create the following automations (via the HA UI or `automations.yaml`):
 
-**Sync slider → vacuum** (when the user moves a slider, send the value to the vacuum):
+**Sync volume sliders → vacuum:**
 
 ```yaml
 - alias: Vacuum Speaker Volume Changed
   trigger:
     - platform: state
       entity_id: input_number.vacuum_speaker_volume
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] }}"
   action:
-    - service: rest_command.vacuum_set_volume
+    - action: rest_command.vacuum_set_volume
       data:
         volume: "{{ states('input_number.vacuum_speaker_volume') | int }}"
 
@@ -271,55 +423,231 @@ Create the following automations (via the HA UI or `automations.yaml`):
   trigger:
     - platform: state
       entity_id: input_number.vacuum_mic_volume
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] }}"
   action:
-    - service: rest_command.vacuum_set_mic_volume
+    - action: rest_command.vacuum_set_mic_volume
       data:
         volume: "{{ states('input_number.vacuum_mic_volume') | int }}"
 ```
 
-**Sync sensor → slider** (on HA startup or when the sensor updates, sync the slider to match):
+**Sync mode/speed/water selectors → vacuum:**
 
 ```yaml
-- alias: Vacuum Volume Sync on Startup
+- alias: Vacuum Mode Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_mode
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_mode
+      data:
+        mode: "{{ states('input_select.vacuum_mode') }}"
+
+- alias: Vacuum Fan Speed Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_fan_speed
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_fan_speed
+      data:
+        speed: "{{ states('input_select.vacuum_fan_speed') }}"
+
+- alias: Vacuum Water Usage Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_water_usage
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_water_usage
+      data:
+        level: "{{ states('input_select.vacuum_water_usage') }}"
+```
+
+**Sync vacuum → sliders/selectors on startup:**
+
+```yaml
+- alias: Vacuum Controls Sync on Startup
   trigger:
     - platform: homeassistant
       event: start
-    - platform: state
-      entity_id: sensor.vacuum_speaker_volume
-    - platform: state
-      entity_id: sensor.vacuum_mic_volume
   action:
-    - service: input_number.set_value
+    - delay:
+        seconds: 30
+    - action: input_number.set_value
       target:
         entity_id: input_number.vacuum_speaker_volume
       data:
         value: "{{ states('sensor.vacuum_speaker_volume') | int(50) }}"
-    - service: input_number.set_value
+    - action: input_number.set_value
       target:
         entity_id: input_number.vacuum_mic_volume
       data:
         value: "{{ states('sensor.vacuum_mic_volume') | int(50) }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_mode
+      data:
+        option: "{{ states('sensor.vacuum_mode') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_fan_speed
+      data:
+        option: "{{ states('sensor.vacuum_fan_speed') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_water_usage
+      data:
+        option: "{{ states('sensor.vacuum_water_usage') }}"
 ```
 
 ### Dashboard Card
 
-Add a vertical-stack card to your Lovelace dashboard:
+Add a vertical-stack card to your Lovelace dashboard for a full vacuum control panel:
 
 ```yaml
 type: vertical-stack
 cards:
+  # --- Live Camera Feed ---
   - type: custom:webrtc-camera
     url: vacuum
     mode: webrtc
     media: video,audio,microphone
     server: http://192.168.1.31:1984
+
+  # --- Status Bar ---
+  - type: horizontal-stack
+    cards:
+      - type: custom:mushroom-entity-card
+        entity: sensor.vacuum_status
+        name: Status
+        icon: mdi:robot-vacuum
+      - type: custom:mushroom-entity-card
+        entity: sensor.vacuum_battery
+        name: Battery
+        icon: mdi:battery
+      - type: custom:mushroom-entity-card
+        entity: sensor.vacuum_mode
+        name: Mode
+        icon: mdi:auto-fix
+
+  # --- Vacuum Actions ---
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Start
+        icon: mdi:play
+        tap_action:
+          action: call-service
+          service: rest_command.vacuum_start
+      - type: button
+        name: Pause
+        icon: mdi:pause
+        tap_action:
+          action: call-service
+          service: rest_command.vacuum_pause
+      - type: button
+        name: Stop
+        icon: mdi:stop
+        tap_action:
+          action: call-service
+          service: rest_command.vacuum_stop
+      - type: button
+        name: Home
+        icon: mdi:home
+        tap_action:
+          action: call-service
+          service: rest_command.vacuum_home
+
+  # --- Manual Drive D-Pad ---
+  - type: vertical-stack
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: ""
+            icon: ""
+            tap_action:
+              action: none
+          - type: button
+            name: Forward
+            icon: mdi:arrow-up-bold
+            tap_action:
+              action: call-service
+              service: script.vacuum_drive_forward
+          - type: button
+            name: ""
+            icon: ""
+            tap_action:
+              action: none
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Left
+            icon: mdi:arrow-left-bold
+            tap_action:
+              action: call-service
+              service: script.vacuum_drive_left
+          - type: button
+            name: Enable
+            icon: mdi:gamepad-variant
+            tap_action:
+              action: call-service
+              service: rest_command.vacuum_drive_enable
+          - type: button
+            name: Right
+            icon: mdi:arrow-right-bold
+            tap_action:
+              action: call-service
+              service: script.vacuum_drive_right
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: ""
+            icon: ""
+            tap_action:
+              action: none
+          - type: button
+            name: Back
+            icon: mdi:arrow-down-bold
+            tap_action:
+              action: call-service
+              service: script.vacuum_drive_backward
+          - type: button
+            name: ""
+            icon: ""
+            tap_action:
+              action: none
+
+  # --- Mode & Speed Selectors ---
   - type: entities
-    title: Vacuum Audio
+    title: Vacuum Settings
+    entities:
+      - entity: input_select.vacuum_mode
+        name: Operation Mode
+      - entity: input_select.vacuum_fan_speed
+        name: Fan Speed
+      - entity: input_select.vacuum_water_usage
+        name: Water Usage
+
+  # --- Volume Controls ---
+  - type: entities
+    title: Audio Controls
     entities:
       - entity: input_number.vacuum_speaker_volume
         name: Speaker Volume
       - entity: input_number.vacuum_mic_volume
         name: Mic Volume
+
+  # --- TTS ---
   - type: horizontal-stack
     cards:
       - type: entities
@@ -332,6 +660,8 @@ cards:
         tap_action:
           action: call-service
           service: script.vacuum_speak_from_input
+
+  # --- Quick Actions ---
   - type: horizontal-stack
     cards:
       - type: button
@@ -350,14 +680,54 @@ cards:
             message: Hello from Home Assistant!
 ```
 
+The D-pad drive scripts should be added to your HA scripts:
+
+```yaml
+script:
+  vacuum_drive_forward:
+    alias: Vacuum Drive Forward
+    sequence:
+      - action: rest_command.vacuum_drive_move
+        data:
+          velocity: "0.5"
+          angle: "0"
+
+  vacuum_drive_backward:
+    alias: Vacuum Drive Backward
+    sequence:
+      - action: rest_command.vacuum_drive_move
+        data:
+          velocity: "-0.5"
+          angle: "0"
+
+  vacuum_drive_left:
+    alias: Vacuum Drive Left
+    sequence:
+      - action: rest_command.vacuum_drive_move
+        data:
+          velocity: "0"
+          angle: "90"
+
+  vacuum_drive_right:
+    alias: Vacuum Drive Right
+    sequence:
+      - action: rest_command.vacuum_drive_move
+        data:
+          velocity: "0"
+          angle: "-90"
+```
+
 The card provides:
 - **Live video** with WebRTC (low latency)
 - **Live audio** from the vacuum's microphone
 - **Two-way audio** — click the microphone button to talk through the vacuum speaker
+- **Status bar** showing current status, battery level, and operation mode
+- **Action buttons** — Start, Pause, Stop, Home
+- **D-pad controls** — manual drive with Forward/Back/Left/Right and Enable button
+- **Mode selectors** — operation mode, fan speed, water usage dropdowns
 - **Volume sliders** for speaker and microphone
 - **TTS text box** with a Speak button
-- **Locate** button to play the vacuum's locate sound
-- **Say Hello** button for a quick TTS test
+- **Quick actions** — Locate and Say Hello buttons
 
 ## File Reference
 
@@ -367,7 +737,7 @@ The card provides:
 | `vacuumstreamer.so` | Compiled shared library (aarch64) |
 | `go2rtc.yaml` | go2rtc configuration — streams, RTSP, WebRTC, backchannel |
 | `play_pcm.sh` | WebRTC backchannel handler — pipes PCM audio to `aplay` |
-| `tts_handler.sh` | HTTP server handler for TTS, audio playback, and volume control |
+| `tts_handler.sh` | HTTP server handler for TTS, audio playback, volume control, and Valetudo API proxy (vacuum controls, manual drive, mode/speed/water, room cleaning) |
 | `_root_postboot.sh` | Boot script — starts Valetudo, ALSA mixer setup, video_monitor, go2rtc, TTS server |
 | `Dockerfile` | Build environment for cross-compiling vacuumstreamer.so |
 | `run.sh` | Docker wrapper for running make |

@@ -1,19 +1,36 @@
 #!/bin/sh
-# TTS/Audio HTTP handler for vacuum speaker
+# TTS/Audio/Control HTTP handler for vacuum
 # Endpoints:
-#   POST /say        - Text-to-speech: POST text body, vacuum speaks it (Google TTS)
-#   POST /play       - Play raw PCM (S16_LE, 16kHz, mono) from request body
-#   POST /play_raw   - Play raw PCM (S16_LE, 16kHz, mono) from request body (alias)
-#   POST /play_ogg   - Play OGG file by path (body: filepath)
-#   GET  /test       - Play locate sound
-#   GET  /volume/N   - Set speaker volume (0-100)
-#   GET  /volume     - Get current speaker volume
-#   GET  /mic_volume/N - Set microphone gain (0-100)
-#   GET  /mic_volume   - Get current microphone gain
+#   POST /say            - Text-to-speech via Google TTS
+#   POST /play           - Play raw PCM (S16_LE, 16kHz, mono)
+#   POST /play_raw       - Alias for /play
+#   POST /play_ogg       - Play OGG file by path
+#   GET  /test           - Play locate sound
+#   GET  /volume/N       - Set speaker volume (0-100)
+#   GET  /volume         - Get current speaker volume
+#   GET  /mic_volume/N   - Set microphone gain (0-100)
+#   GET  /mic_volume     - Get current microphone gain
+#   GET  /status         - Get vacuum state (status, battery, mode, fan, water)
+#   GET  /start          - Start cleaning
+#   GET  /stop           - Stop cleaning
+#   GET  /pause          - Pause cleaning
+#   GET  /home           - Return to dock
+#   GET  /mode           - Get current operation mode
+#   GET  /mode/MODE      - Set operation mode (vacuum, mop, vacuum_and_mop)
+#   GET  /fan_speed       - Get current fan speed
+#   GET  /fan_speed/SPEED - Set fan speed (low, medium, high, max)
+#   GET  /water_usage       - Get current water usage level
+#   GET  /water_usage/LEVEL - Set water usage (min, low, medium, high, max)
+#   GET  /drive/enable   - Enable manual driving mode
+#   GET  /drive/disable  - Disable manual driving mode
+#   POST /drive/move     - Move: JSON body {"velocity": -1..1, "angle": -180..180}
+#   GET  /segments       - List map segments (rooms)
+#   POST /segments/clean - Clean specific segments: JSON body {"segment_ids": ["1","2"]}
 #
 # Usage: tcpsvd -vE 0.0.0.0 6971 /data/vacuumstreamer/tts_handler.sh
 
 FFMPEG="/data/vacuumstreamer/ffmpeg"
+VALETUDO="http://127.0.0.1"
 
 read -r REQUEST_LINE
 METHOD=$(echo "$REQUEST_LINE" | cut -d" " -f1)
@@ -188,7 +205,160 @@ case "$BASE_PATH" in
         amixer cset numid=6 "$MIC_RAW" > /dev/null 2>&1
         send_response "200 OK" "mic volume set to $MIC_PCT (raw: $MIC_RAW)"
         ;;
+
+    # ---- Vacuum Control (Valetudo API proxy) ----
+    /status)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/state/attributes" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /start)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/BasicControlCapability" \
+            -d '{"action":"start"}' 2>/dev/null)
+        send_response "200 OK" "$RESULT"
+        ;;
+    /stop)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/BasicControlCapability" \
+            -d '{"action":"stop"}' 2>/dev/null)
+        send_response "200 OK" "$RESULT"
+        ;;
+    /pause)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/BasicControlCapability" \
+            -d '{"action":"pause"}' 2>/dev/null)
+        send_response "200 OK" "$RESULT"
+        ;;
+    /home)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/BasicControlCapability" \
+            -d '{"action":"home"}' 2>/dev/null)
+        send_response "200 OK" "$RESULT"
+        ;;
+    /mode)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/state/attributes" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            # Extract operation_mode from state attributes
+            MODE=$(echo "$RESULT" | sed -n 's/.*"type":"operation_mode","value":"\([^"]*\)".*/\1/p')
+            send_json_response "200 OK" "{\"mode\":\"$MODE\"}"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /mode/*)
+        NEW_MODE=$(echo "$BASE_PATH" | sed 's|/mode/||')
+        case "$NEW_MODE" in
+            vacuum|mop|vacuum_and_mop)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/OperationModeControlCapability/preset" \
+                    -d "{\"name\":\"$NEW_MODE\"}" 2>/dev/null)
+                send_response "200 OK" "mode set to $NEW_MODE"
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid mode: $NEW_MODE (use: vacuum, mop, vacuum_and_mop)"
+                ;;
+        esac
+        ;;
+    /fan_speed)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/state/attributes" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            SPEED=$(echo "$RESULT" | sed -n 's/.*"type":"fan_speed","value":"\([^"]*\)".*/\1/p')
+            send_json_response "200 OK" "{\"fan_speed\":\"$SPEED\"}"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /fan_speed/*)
+        NEW_SPEED=$(echo "$BASE_PATH" | sed 's|/fan_speed/||')
+        case "$NEW_SPEED" in
+            low|medium|high|max)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/FanSpeedControlCapability/preset" \
+                    -d "{\"name\":\"$NEW_SPEED\"}" 2>/dev/null)
+                send_response "200 OK" "fan speed set to $NEW_SPEED"
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid fan speed: $NEW_SPEED (use: low, medium, high, max)"
+                ;;
+        esac
+        ;;
+    /water_usage)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/state/attributes" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            WATER=$(echo "$RESULT" | sed -n 's/.*"type":"water_grade","value":"\([^"]*\)".*/\1/p')
+            send_json_response "200 OK" "{\"water_usage\":\"$WATER\"}"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /water_usage/*)
+        NEW_WATER=$(echo "$BASE_PATH" | sed 's|/water_usage/||')
+        case "$NEW_WATER" in
+            min|low|medium|high|max)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/WaterUsageControlCapability/preset" \
+                    -d "{\"name\":\"$NEW_WATER\"}" 2>/dev/null)
+                send_response "200 OK" "water usage set to $NEW_WATER"
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid water usage: $NEW_WATER (use: min, low, medium, high, max)"
+                ;;
+        esac
+        ;;
+    /drive/enable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/HighResolutionManualControlCapability" \
+            -d '{"action":"enable"}' 2>/dev/null)
+        send_response "200 OK" "manual control enabled"
+        ;;
+    /drive/disable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/HighResolutionManualControlCapability" \
+            -d '{"action":"disable"}' 2>/dev/null)
+        send_response "200 OK" "manual control disabled"
+        ;;
+    /drive/move)
+        if [ "$METHOD" = "POST" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
+            BODY=$(dd bs=1 count=$CONTENT_LENGTH 2>/dev/null)
+            # Extract velocity and angle from JSON body
+            VELOCITY=$(echo "$BODY" | sed -n 's/.*"velocity" *: *\([0-9.eE+-]*\).*/\1/p')
+            ANGLE=$(echo "$BODY" | sed -n 's/.*"angle" *: *\([0-9.eE+-]*\).*/\1/p')
+            if [ -z "$VELOCITY" ] || [ -z "$ANGLE" ]; then
+                send_response "400 Bad Request" "JSON body required: {\"velocity\": -1..1, \"angle\": -180..180}"
+                exit 0
+            fi
+            RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                "$VALETUDO/api/v2/robot/capabilities/HighResolutionManualControlCapability" \
+                -d "{\"action\":\"move\",\"vector\":{\"velocity\":$VELOCITY,\"angle\":$ANGLE}}" 2>/dev/null)
+            send_response "200 OK" "$RESULT"
+        else
+            send_response "400 Bad Request" "POST JSON body required: {\"velocity\": -1..1, \"angle\": -180..180}"
+        fi
+        ;;
+    /segments)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/MapSegmentationCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /segments/clean)
+        if [ "$METHOD" = "POST" ] && [ "$CONTENT_LENGTH" -gt 0 ]; then
+            BODY=$(dd bs=1 count=$CONTENT_LENGTH 2>/dev/null)
+            RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                "$VALETUDO/api/v2/robot/capabilities/MapSegmentationCapability" \
+                -d "$BODY" 2>/dev/null)
+            send_response "200 OK" "$RESULT"
+        else
+            send_response "400 Bad Request" "POST JSON body: {\"segment_ids\": [\"1\",\"2\"], \"iterations\": 1}"
+        fi
+        ;;
     *)
-        send_response "404 Not Found" "endpoints: POST /say, POST /play, POST /play_ogg, GET /test, GET /volume[/N], GET /mic_volume[/N]"
+        send_response "404 Not Found" "endpoints: /say, /play, /play_ogg, /test, /volume[/N], /mic_volume[/N], /status, /start, /stop, /pause, /home, /mode[/MODE], /fan_speed[/SPEED], /water_usage[/LEVEL], /drive/enable, /drive/disable, /drive/move, /segments, /segments/clean"
         ;;
 esac
