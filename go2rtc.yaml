@@ -1,0 +1,18 @@
+streams:
+  vacuum:
+    - tcp://127.0.0.1:6969
+    - "exec:arecord -D hw:0,0 -f S16_LE -r 16000 -c 1 -t wav#backchannel=/data/vacuumstreamer/play_pcm.sh"
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  candidates:
+    - 192.168.1.31:8555
+  listen: ":8555"
+
+ffmpeg:
+  bin: /data/vacuumstreamer/ffmpeg
