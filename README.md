@@ -8,7 +8,7 @@ Tested on: Dreame L10s Ultra (Allwinner MR813/sun50iw10, ARM64, Athena Linux).
 
 ## Features
 
-- **Live video** — H.264, 864×480, ~15fps via WebRTC or RTSP
+- **Live video** — H.264 via WebRTC or RTSP, switchable quality profiles
 - **Live audio** — Microphone capture from the vacuum
 - **Two-way audio** — Talk through the vacuum speaker via WebRTC backchannel
 - **Text-to-speech** — Google TTS HTTP endpoint, speak any text through the vacuum
@@ -16,7 +16,8 @@ Tested on: Dreame L10s Ultra (Allwinner MR813/sun50iw10, ARM64, Athena Linux).
 - **Vacuum controls** — Start/stop/pause/home, operation mode, fan speed, water usage
 - **Manual driving** — Remote-control the vacuum with velocity/angle commands
 - **Room cleaning** — Clean specific rooms by segment ID
-- **Home Assistant integration** — Full dashboard with camera, D-pad driving controls, mode/speed selectors, TTS, and volume
+- **Video quality switching** — Toggle between low (864×480/15fps/600kbps) and high (640×480/25fps/2Mbps) profiles
+- **Home Assistant integration** — Full dashboard with camera, D-pad driving controls, mode/speed/quality selectors, TTS, and volume
 
 ## Architecture
 
@@ -152,6 +153,8 @@ The `tts_handler.sh` script runs via `tcpsvd` on port 6971 and provides:
 | `/drive/move` | POST | Move vacuum. Body: `{"velocity": -1..1, "angle": -180..180}` |
 | `/segments` | GET | List map segments (rooms) |
 | `/segments/clean` | POST | Clean rooms. Body: `{"segment_ids": ["1","2"], "iterations": 1}` |
+| `/video_quality` | GET | Get current video profile: `{"profile":"low","width":864,"height":480,"framerate":15,"bitrate":600000}` |
+| `/video_quality/PROFILE` | GET | Set video profile: `low` (864×480/15fps/600kbps) or `high` (640×480/25fps/2Mbps). Restarts video_monitor |
 
 ### Examples
 
@@ -181,6 +184,15 @@ curl http://192.168.1.31:6971/drive/disable
 
 # Clean specific rooms
 curl -X POST -d '{"segment_ids": ["3","4"], "iterations": 1}' http://192.168.1.31:6971/segments/clean
+
+# Get current video quality
+curl http://192.168.1.31:6971/video_quality
+
+# Switch to high quality
+curl http://192.168.1.31:6971/video_quality/high
+
+# Switch back to low quality
+curl http://192.168.1.31:6971/video_quality/low
 ```
 
 ## Home Assistant Integration
@@ -273,6 +285,11 @@ rest_command:
     payload: >-
       {"velocity": {{ velocity }}, "angle": {{ angle }}}
 
+  # --- Video Quality ---
+  vacuum_set_video_quality:
+    url: "http://192.168.1.31:6971/video_quality/{{ profile }}"
+    method: GET
+
   # --- Room Cleaning ---
   vacuum_clean_segments:
     url: "http://192.168.1.31:6971/segments/clean"
@@ -331,6 +348,17 @@ sensor:
     value_template: "{{ value_json.water_usage }}"
     scan_interval: 30
 
+  - platform: rest
+    name: Vacuum Video Quality
+    resource: "http://192.168.1.31:6971/video_quality"
+    value_template: "{{ value_json.profile }}"
+    json_attributes:
+      - width
+      - height
+      - framerate
+      - bitrate
+    scan_interval: 60
+
 # Input controls
 input_number:
   vacuum_speaker_volume:
@@ -382,6 +410,13 @@ input_select:
       - high
       - max
     icon: mdi:water
+
+  vacuum_video_quality:
+    name: Vacuum Video Quality
+    options:
+      - low
+      - high
+    icon: mdi:video
 
 # Scripts
 script:
@@ -470,6 +505,18 @@ Create the following automations (via the HA UI or `automations.yaml`):
     - action: rest_command.vacuum_set_water_usage
       data:
         level: "{{ states('input_select.vacuum_water_usage') }}"
+
+- alias: Vacuum Video Quality Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_video_quality
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_video_quality
+      data:
+        profile: "{{ states('input_select.vacuum_video_quality') }}"
 ```
 
 **Sync vacuum → sliders/selectors on startup:**
@@ -507,6 +554,11 @@ Create the following automations (via the HA UI or `automations.yaml`):
         entity_id: input_select.vacuum_water_usage
       data:
         option: "{{ states('sensor.vacuum_water_usage') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_video_quality
+      data:
+        option: "{{ states('sensor.vacuum_video_quality') }}"
 ```
 
 ### Dashboard Card
@@ -637,6 +689,8 @@ cards:
         name: Fan Speed
       - entity: input_select.vacuum_water_usage
         name: Water Usage
+      - entity: input_select.vacuum_video_quality
+        name: Video Quality
 
   # --- Volume Controls ---
   - type: entities
@@ -737,7 +791,7 @@ The card provides:
 | `vacuumstreamer.so` | Compiled shared library (aarch64) |
 | `go2rtc.yaml` | go2rtc configuration — streams, RTSP, WebRTC, backchannel |
 | `play_pcm.sh` | WebRTC backchannel handler — pipes PCM audio to `aplay` |
-| `tts_handler.sh` | HTTP server handler for TTS, audio playback, volume control, and Valetudo API proxy (vacuum controls, manual drive, mode/speed/water, room cleaning) |
+| `tts_handler.sh` | HTTP server handler for TTS, audio playback, volume control, video quality switching, and Valetudo API proxy (vacuum controls, manual drive, mode/speed/water, room cleaning) |
 | `_root_postboot.sh` | Boot script — starts Valetudo, ALSA mixer setup, video_monitor, go2rtc, TTS server |
 | `Dockerfile` | Build environment for cross-compiling vacuumstreamer.so |
 | `run.sh` | Docker wrapper for running make |

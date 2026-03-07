@@ -24,6 +24,8 @@
 #   GET  /drive/enable   - Enable manual driving mode
 #   GET  /drive/disable  - Disable manual driving mode
 #   POST /drive/move     - Move: JSON body {"velocity": -1..1, "angle": -180..180}
+#   GET  /video_quality         - Get current video quality profile
+#   GET  /video_quality/PROFILE - Set video quality (low, high)
 #   GET  /segments       - List map segments (rooms)
 #   POST /segments/clean - Clean specific segments: JSON body {"segment_ids": ["1","2"]}
 #
@@ -31,6 +33,7 @@
 
 FFMPEG="/data/vacuumstreamer/ffmpeg"
 VALETUDO="http://127.0.0.1"
+RECORDER_CFG="/data/vacuumstreamer/ava_conf_video_monitor/recorder.cfg"
 
 read -r REQUEST_LINE
 METHOD=$(echo "$REQUEST_LINE" | cut -d" " -f1)
@@ -358,7 +361,48 @@ case "$BASE_PATH" in
             send_response "400 Bad Request" "POST JSON body: {\"segment_ids\": [\"1\",\"2\"], \"iterations\": 1}"
         fi
         ;;
+    /video_quality)
+        # Read current encoder settings from recorder.cfg
+        CUR_W=$(grep "^encoder_voutput_width" "$RECORDER_CFG" | head -1 | sed 's/.*= *//')
+        CUR_H=$(grep "^encoder_voutput_height" "$RECORDER_CFG" | head -1 | sed 's/.*= *//')
+        CUR_FPS=$(grep "^encoder_voutput_framerate" "$RECORDER_CFG" | head -1 | sed 's/.*= *//')
+        CUR_BR=$(grep "^encoder_voutput_bitrate" "$RECORDER_CFG" | head -1 | sed 's/.*= *//')
+        if [ "$CUR_BR" = "600000" ] && [ "$CUR_FPS" = "15" ]; then
+            PROFILE="low"
+        else
+            PROFILE="high"
+        fi
+        send_json_response "200 OK" "{\"profile\":\"$PROFILE\",\"width\":$CUR_W,\"height\":$CUR_H,\"framerate\":$CUR_FPS,\"bitrate\":$CUR_BR}"
+        ;;
+    /video_quality/*)
+        NEW_PROFILE=$(echo "$BASE_PATH" | sed 's|/video_quality/||')
+        case "$NEW_PROFILE" in
+            low)
+                VW=864; VH=480; VF=15; VB=600000
+                ;;
+            high)
+                VW=640; VH=480; VF=25; VB=2000000
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid profile: $NEW_PROFILE (use: low, high)"
+                exit 0
+                ;;
+        esac
+        # Update camera 0 settings (first occurrence only, lines 1-70)
+        sed -i "1,70{/^video_width = /s/.*/video_width = $VW/}" "$RECORDER_CFG"
+        sed -i "1,70{/^video_height = /s/.*/video_height = $VH/}" "$RECORDER_CFG"
+        sed -i "1,70{/^video_framerate = /s/.*/video_framerate = $VF/}" "$RECORDER_CFG"
+        sed -i "1,70{/^encoder_voutput_width = /s/.*/encoder_voutput_width = $VW/}" "$RECORDER_CFG"
+        sed -i "1,70{/^encoder_voutput_height = /s/.*/encoder_voutput_height = $VH/}" "$RECORDER_CFG"
+        sed -i "1,70{/^encoder_voutput_framerate = /s/.*/encoder_voutput_framerate = $VF/}" "$RECORDER_CFG"
+        sed -i "1,70{/^encoder_voutput_bitrate = /s/.*/encoder_voutput_bitrate = $VB/}" "$RECORDER_CFG"
+        # Restart video_monitor to apply changes
+        killall video_monitor 2>/dev/null
+        sleep 1
+        LD_PRELOAD=/data/vacuumstreamer/vacuumstreamer.so /data/vacuumstreamer/video_monitor > /dev/null 2>&1 &
+        send_json_response "200 OK" "{\"profile\":\"$NEW_PROFILE\",\"width\":$VW,\"height\":$VH,\"framerate\":$VF,\"bitrate\":$VB}"
+        ;;
     *)
-        send_response "404 Not Found" "endpoints: /say, /play, /play_ogg, /test, /volume[/N], /mic_volume[/N], /status, /start, /stop, /pause, /home, /mode[/MODE], /fan_speed[/SPEED], /water_usage[/LEVEL], /drive/enable, /drive/disable, /drive/move, /segments, /segments/clean"
+        send_response "404 Not Found" "endpoints: /say, /play, /play_ogg, /test, /volume[/N], /mic_volume[/N], /status, /start, /stop, /pause, /home, /mode[/MODE], /fan_speed[/SPEED], /water_usage[/LEVEL], /drive/enable, /drive/disable, /drive/move, /video_quality[/PROFILE], /segments, /segments/clean"
         ;;
 esac
