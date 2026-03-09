@@ -24,16 +24,39 @@
 #   GET  /drive/enable   - Enable manual driving mode
 #   GET  /drive/disable  - Disable manual driving mode
 #   POST /drive/move     - Move: JSON body {"velocity": -1..1, "angle": -180..180}
+#   GET  /drive/speed          - Get current drive speed (0-100)
+#   GET  /drive/speed/N        - Set drive speed 0-100 (maps to velocity 0.0-1.0)
 #   GET  /video_quality         - Get current video quality profile
 #   GET  /video_quality/PROFILE - Set video quality (low, high)
 #   GET  /segments       - List map segments (rooms)
 #   POST /segments/clean - Clean specific segments: JSON body {"segment_ids": ["1","2"]}
+#   GET  /statistics     - Get total and current cleaning statistics
+#   GET  /consumables    - Get consumable remaining life
+#   GET  /dnd            - Get Do Not Disturb configuration
+#   PUT  /dnd            - Set DND: JSON body {"enabled":true,"start":{"hour":22,"minute":0},"end":{"hour":8,"minute":0}}
+#   GET  /carpet_mode         - Get carpet sensor mode
+#   GET  /carpet_mode/MODE    - Set carpet sensor mode (off, avoid, lift)
+#   GET  /obstacle_images      - Get obstacle image detection status (enabled/disabled)
+#   GET  /obstacle_images/enable  - Enable obstacle images
+#   GET  /obstacle_images/disable - Disable obstacle images
+#   GET  /obstacle_avoidance      - Get obstacle avoidance status
+#   GET  /obstacle_avoidance/enable  - Enable obstacle avoidance
+#   GET  /obstacle_avoidance/disable - Disable obstacle avoidance
+#   GET  /child_lock            - Get child lock (key lock) status
+#   GET  /child_lock/enable     - Enable child lock
+#   GET  /child_lock/disable    - Disable child lock
+#   GET  /auto_empty_interval   - Get auto-empty dock interval
+#   GET  /auto_empty_interval/INTERVAL - Set interval (normal, frequent, every_clean)
+#   GET  /quirks          - List all quirks with current values
+#   POST /quirks          - Set a quirk: JSON body {"id":"...","value":"..."}
+#   GET  /quirk/ID        - Get a single quirk value by UUID
 #
 # Usage: tcpsvd -vE 0.0.0.0 6971 /data/vacuumstreamer/tts_handler.sh
 
 FFMPEG="/data/vacuumstreamer/ffmpeg"
 VALETUDO="http://127.0.0.1"
 RECORDER_CFG="/data/vacuumstreamer/ava_conf_video_monitor/recorder.cfg"
+DRIVE_SPEED_FILE="/tmp/drive_speed"
 
 read -r REQUEST_LINE
 METHOD=$(echo "$REQUEST_LINE" | cut -d" " -f1)
@@ -342,6 +365,25 @@ case "$BASE_PATH" in
             send_response "400 Bad Request" "POST JSON body required: {\"velocity\": -1..1, \"angle\": -180..180}"
         fi
         ;;
+    /drive/speed)
+        # Read stored drive speed percentage (default 50)
+        if [ -f "$DRIVE_SPEED_FILE" ]; then
+            SPD=$(cat "$DRIVE_SPEED_FILE")
+        else
+            SPD=50
+        fi
+        send_json_response "200 OK" "{\"speed\":$SPD}"
+        ;;
+    /drive/speed/*)
+        NEW_SPD=$(echo "$BASE_PATH" | sed 's|/drive/speed/||')
+        # Validate 0-100
+        if [ "$NEW_SPD" -ge 0 ] 2>/dev/null && [ "$NEW_SPD" -le 100 ] 2>/dev/null; then
+            echo "$NEW_SPD" > "$DRIVE_SPEED_FILE"
+            send_json_response "200 OK" "{\"speed\":$NEW_SPD}"
+        else
+            send_response "400 Bad Request" "speed must be 0-100"
+        fi
+        ;;
     /segments)
         RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/MapSegmentationCapability" 2>/dev/null)
         if [ -n "$RESULT" ]; then
@@ -359,6 +401,222 @@ case "$BASE_PATH" in
             send_response "200 OK" "$RESULT"
         else
             send_response "400 Bad Request" "POST JSON body: {\"segment_ids\": [\"1\",\"2\"], \"iterations\": 1}"
+        fi
+        ;;
+
+    # ---- Statistics ----
+    /statistics)
+        TOTAL=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/TotalStatisticsCapability" 2>/dev/null)
+        CURRENT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/CurrentStatisticsCapability" 2>/dev/null)
+        if [ -n "$TOTAL" ] && [ -n "$CURRENT" ]; then
+            send_json_response "200 OK" "{\"total\":$TOTAL,\"current\":$CURRENT}"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+
+    # ---- Consumables ----
+    /consumables)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/ConsumableMonitoringCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /consumables/reset/*)
+        # /consumables/reset/TYPE or /consumables/reset/TYPE/SUBTYPE
+        RESET_PATH=$(echo "$BASE_PATH" | sed 's|/consumables/reset/||')
+        C_TYPE=$(echo "$RESET_PATH" | cut -d'/' -f1)
+        C_SUBTYPE=$(echo "$RESET_PATH" | cut -d'/' -f2 -s)
+        if [ -n "$C_SUBTYPE" ]; then
+            RESET_URL="$VALETUDO/api/v2/robot/capabilities/ConsumableMonitoringCapability/$C_TYPE/$C_SUBTYPE"
+        else
+            RESET_URL="$VALETUDO/api/v2/robot/capabilities/ConsumableMonitoringCapability/$C_TYPE"
+        fi
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$RESET_URL" -d '{"action":"reset"}' 2>/dev/null)
+        send_response "200 OK" "consumable reset: $C_TYPE $C_SUBTYPE"
+        ;;
+
+    # ---- Do Not Disturb ----
+    /dnd)
+        if [ "$METHOD" = "PUT" ] || [ "$METHOD" = "POST" ]; then
+            if [ "$CONTENT_LENGTH" -gt 0 ]; then
+                BODY=$(dd bs=1 count=$CONTENT_LENGTH 2>/dev/null)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/DoNotDisturbCapability" \
+                    -d "$BODY" 2>/dev/null)
+                send_response "200 OK" "DND updated"
+            else
+                send_response "400 Bad Request" "JSON body required: {\"enabled\":true,\"start\":{\"hour\":22,\"minute\":0},\"end\":{\"hour\":8,\"minute\":0}}"
+            fi
+        else
+            RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/DoNotDisturbCapability" 2>/dev/null)
+            if [ -n "$RESULT" ]; then
+                send_json_response "200 OK" "$RESULT"
+            else
+                send_response "502 Bad Gateway" "valetudo unreachable"
+            fi
+        fi
+        ;;
+
+    # ---- Carpet Sensor Mode ----
+    /carpet_mode)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/CarpetSensorModeControlCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /carpet_mode/*)
+        NEW_CARPET=$(echo "$BASE_PATH" | sed 's|/carpet_mode/||')
+        case "$NEW_CARPET" in
+            off|avoid|lift)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/CarpetSensorModeControlCapability" \
+                    -d "{\"mode\":\"$NEW_CARPET\"}" 2>/dev/null)
+                send_response "200 OK" "carpet mode set to $NEW_CARPET"
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid carpet mode: $NEW_CARPET (use: off, avoid, lift)"
+                ;;
+        esac
+        ;;
+
+    # ---- Obstacle Images ----
+    /obstacle_images)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/ObstacleImagesCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /obstacle_images/enable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/ObstacleImagesCapability" \
+            -d '{"action":"enable"}' 2>/dev/null)
+        send_response "200 OK" "obstacle images enabled"
+        ;;
+    /obstacle_images/disable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/ObstacleImagesCapability" \
+            -d '{"action":"disable"}' 2>/dev/null)
+        send_response "200 OK" "obstacle images disabled"
+        ;;
+
+    # ---- Obstacle Avoidance ----
+    /obstacle_avoidance)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/ObstacleAvoidanceControlCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /obstacle_avoidance/enable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/ObstacleAvoidanceControlCapability" \
+            -d '{"action":"enable"}' 2>/dev/null)
+        send_response "200 OK" "obstacle avoidance enabled"
+        ;;
+    /obstacle_avoidance/disable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/ObstacleAvoidanceControlCapability" \
+            -d '{"action":"disable"}' 2>/dev/null)
+        send_response "200 OK" "obstacle avoidance disabled"
+        ;;
+
+    # ---- Child Lock (Key Lock) ----
+    /child_lock)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/KeyLockCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /child_lock/enable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/KeyLockCapability" \
+            -d '{"action":"enable"}' 2>/dev/null)
+        send_response "200 OK" "child lock enabled"
+        ;;
+    /child_lock/disable)
+        RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+            "$VALETUDO/api/v2/robot/capabilities/KeyLockCapability" \
+            -d '{"action":"disable"}' 2>/dev/null)
+        send_response "200 OK" "child lock disabled"
+        ;;
+
+    # ---- Auto Empty Dock Interval ----
+    /auto_empty_interval)
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/AutoEmptyDockAutoEmptyIntervalControlCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            send_json_response "200 OK" "$RESULT"
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /auto_empty_interval/*)
+        NEW_INTERVAL=$(echo "$BASE_PATH" | sed 's|/auto_empty_interval/||')
+        case "$NEW_INTERVAL" in
+            normal|frequent|every_clean)
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/AutoEmptyDockAutoEmptyIntervalControlCapability" \
+                    -d "{\"interval\":\"$NEW_INTERVAL\"}" 2>/dev/null)
+                send_response "200 OK" "auto empty interval set to $NEW_INTERVAL"
+                ;;
+            *)
+                send_response "400 Bad Request" "invalid interval: $NEW_INTERVAL (use: normal, frequent, every_clean)"
+                ;;
+        esac
+        ;;
+
+    # ---- Quirks ----
+    /quirk/*)
+        QUIRK_ID=$(echo "$BASE_PATH" | sed 's|/quirk/||')
+        RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/QuirksCapability" 2>/dev/null)
+        if [ -n "$RESULT" ]; then
+            Q_VAL=$(echo "$RESULT" | sed -n 's/.*"id" *: *"'"$QUIRK_ID"'"[^}]*"value" *: *"\([^"]*\)".*/\1/p')
+            if [ -z "$Q_VAL" ]; then
+                Q_VAL=$(echo "$RESULT" | tr '{' '\n' | grep "$QUIRK_ID" | sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p')
+            fi
+            if [ -n "$Q_VAL" ]; then
+                send_json_response "200 OK" "{\"id\":\"$QUIRK_ID\",\"value\":\"$Q_VAL\"}"
+            else
+                send_response "404 Not Found" "quirk not found: $QUIRK_ID"
+            fi
+        else
+            send_response "502 Bad Gateway" "valetudo unreachable"
+        fi
+        ;;
+    /quirks)
+        if [ "$METHOD" = "POST" ] || [ "$METHOD" = "PUT" ]; then
+            if [ "$CONTENT_LENGTH" -gt 0 ]; then
+                BODY=$(dd bs=1 count=$CONTENT_LENGTH 2>/dev/null)
+                Q_ID=$(echo "$BODY" | sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p')
+                Q_VAL=$(echo "$BODY" | sed -n 's/.*"value" *: *"\([^"]*\)".*/\1/p')
+                if [ -z "$Q_ID" ] || [ -z "$Q_VAL" ]; then
+                    send_response "400 Bad Request" "JSON body required: {\"id\":\"quirk-uuid\",\"value\":\"option\"}"
+                    exit 0
+                fi
+                RESULT=$(curl -s -m 10 -X PUT -H "Content-Type: application/json" \
+                    "$VALETUDO/api/v2/robot/capabilities/QuirksCapability" \
+                    -d "{\"id\":\"$Q_ID\",\"value\":\"$Q_VAL\"}" 2>/dev/null)
+                send_response "200 OK" "quirk updated"
+            else
+                send_response "400 Bad Request" "JSON body required: {\"id\":\"quirk-uuid\",\"value\":\"option\"}"
+            fi
+        else
+            RESULT=$(curl -s -m 5 "$VALETUDO/api/v2/robot/capabilities/QuirksCapability" 2>/dev/null)
+            if [ -n "$RESULT" ]; then
+                send_json_response "200 OK" "$RESULT"
+            else
+                send_response "502 Bad Gateway" "valetudo unreachable"
+            fi
         fi
         ;;
     /video_quality)
@@ -403,6 +661,6 @@ case "$BASE_PATH" in
         send_json_response "200 OK" "{\"profile\":\"$NEW_PROFILE\",\"width\":$VW,\"height\":$VH,\"framerate\":$VF,\"bitrate\":$VB}"
         ;;
     *)
-        send_response "404 Not Found" "endpoints: /say, /play, /play_ogg, /test, /volume[/N], /mic_volume[/N], /status, /start, /stop, /pause, /home, /mode[/MODE], /fan_speed[/SPEED], /water_usage[/LEVEL], /drive/enable, /drive/disable, /drive/move, /video_quality[/PROFILE], /segments, /segments/clean"
+        send_response "404 Not Found" "endpoints: /say, /play, /play_ogg, /test, /volume[/N], /mic_volume[/N], /status, /start, /stop, /pause, /home, /mode[/MODE], /fan_speed[/SPEED], /water_usage[/LEVEL], /drive/enable, /drive/disable, /drive/move, /drive/speed[/N], /video_quality[/PROFILE], /segments, /segments/clean, /statistics, /consumables, /dnd, /carpet_mode[/MODE], /obstacle_images[/enable|disable], /obstacle_avoidance[/enable|disable], /child_lock[/enable|disable], /auto_empty_interval[/INTERVAL], /quirks, /quirk/ID"
         ;;
 esac

@@ -14,10 +14,14 @@ Tested on: Dreame L10s Ultra (Allwinner MR813/sun50iw10, ARM64, Athena Linux).
 - **Text-to-speech** — Google TTS HTTP endpoint, speak any text through the vacuum
 - **Volume control** — Speaker and microphone volume via HTTP API
 - **Vacuum controls** — Start/stop/pause/home, operation mode, fan speed, water usage
-- **Manual driving** — Remote-control the vacuum with velocity/angle commands
+- **Manual driving** — Remote-control the vacuum with adjustable speed (velocity slider)
 - **Room cleaning** — Clean specific rooms by segment ID
 - **Video quality switching** — Toggle between low (864×480/15fps/600kbps) and high (640×480/25fps/2Mbps) profiles
-- **Home Assistant integration** — Full dashboard with camera, D-pad driving controls, mode/speed/quality selectors, TTS, and volume
+- **Statistics & consumables** — Runtime stats, filter/brush/mop wear monitoring
+- **Feature controls** — DND mode, carpet mode, obstacle avoidance, obstacle images, child lock, auto-empty interval
+- **Quirk settings** — Carpet sensitivity, mop cleaning frequency, mop wash intensity, pre-wet mops, detergent, carpet-first mode
+- **Dock actions** — Trigger dock auto-repair, drain water tank, dock cleaning process, water hookup test
+- **Home Assistant integration** — Full dashboard with camera, D-pad driving controls, mode/speed/quality selectors, feature toggles, quirk settings, dock actions, TTS, and volume
 
 ## Architecture
 
@@ -155,6 +159,18 @@ The `tts_handler.sh` script runs via `tcpsvd` on port 6971 and provides:
 | `/segments/clean` | POST | Clean rooms. Body: `{"segment_ids": ["1","2"], "iterations": 1}` |
 | `/video_quality` | GET | Get current video profile: `{"profile":"low","width":864,"height":480,"framerate":15,"bitrate":600000}` |
 | `/video_quality/PROFILE` | GET | Set video profile: `low` (864×480/15fps/600kbps) or `high` (640×480/25fps/2Mbps). Restarts video_monitor |
+| `/statistics` | GET | Get vacuum runtime statistics (area, time, count, total) |
+| `/consumables` | GET | Get consumable status (filter, brushes, mops, sensors) with remaining % |
+| `/dnd` | GET | Get Do Not Disturb mode state |
+| `/carpet_mode` | GET | Get carpet detection mode |
+| `/obstacle_images` | GET | Get obstacle image capture setting |
+| `/obstacle_avoidance` | GET | Get obstacle avoidance setting |
+| `/child_lock` | GET | Get child lock state |
+| `/auto_empty_interval` | GET | Get auto-empty dustbin interval |
+| `/drive/speed` | GET | Get current drive speed (0–100) |
+| `/drive/speed/N` | GET | Set drive speed (0–100), affects D-pad velocity |
+| `/quirks` | GET | Get all vacuum quirk settings (JSON array) |
+| `/quirk/UUID` | GET | Get individual quirk value by UUID: `{"id":"...","value":"..."}` |
 
 ### Examples
 
@@ -193,6 +209,26 @@ curl http://192.168.1.31:6971/video_quality/high
 
 # Switch back to low quality
 curl http://192.168.1.31:6971/video_quality/low
+
+# Get statistics
+curl http://192.168.1.31:6971/statistics
+
+# Get consumable status
+curl http://192.168.1.31:6971/consumables
+
+# Get feature states
+curl http://192.168.1.31:6971/dnd
+curl http://192.168.1.31:6971/carpet_mode
+curl http://192.168.1.31:6971/obstacle_avoidance
+
+# Set drive speed to 75%
+curl http://192.168.1.31:6971/drive/speed/75
+
+# Get all quirk settings
+curl http://192.168.1.31:6971/quirks
+
+# Get individual quirk (carpet sensitivity)
+curl http://192.168.1.31:6971/quirk/f8cb91ab-a47a-445f-b300-0aac0d4937c0
 ```
 
 ## Home Assistant Integration
@@ -298,6 +334,36 @@ rest_command:
     payload: >-
       {"segment_ids": {{ segment_ids }}, "iterations": {{ iterations | default(1) }}}
 
+  # --- Feature Controls ---
+  vacuum_set_carpet_mode:
+    url: "http://192.168.1.31:6971/carpet_mode/{{ mode }}"
+    method: GET
+
+  vacuum_set_auto_empty_interval:
+    url: "http://192.168.1.31:6971/auto_empty_interval/{{ interval }}"
+    method: GET
+
+  vacuum_set_drive_speed:
+    url: "http://192.168.1.31:6971/drive/speed/{{ speed }}"
+    method: GET
+
+  vacuum_toggle_obstacle_avoidance:
+    url: "http://192.168.1.31:6971/obstacle_avoidance/toggle"
+    method: GET
+
+  vacuum_toggle_obstacle_images:
+    url: "http://192.168.1.31:6971/obstacle_images/toggle"
+    method: GET
+
+  vacuum_toggle_child_lock:
+    url: "http://192.168.1.31:6971/child_lock/toggle"
+    method: GET
+
+  # --- Quirk Controls ---
+  vacuum_set_quirk:
+    url: "http://192.168.1.31:6971/quirk/{{ quirk_id }}/{{ value }}"
+    method: GET
+
 # Sensors
 sensor:
   - platform: rest
@@ -359,6 +425,108 @@ sensor:
       - bitrate
     scan_interval: 60
 
+  - platform: rest
+    name: Vacuum Total Statistics
+    resource: "http://192.168.1.31:6971/statistics"
+    value_template: "{{ value_json.count }}"
+    json_attributes:
+      - area
+      - time
+      - count
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Consumables
+    resource: "http://192.168.1.31:6971/consumables"
+    value_template: >-
+      {% set items = value_json %}{% set low = items | selectattr('remaining_pct','lt',20) | list %}{{ 'replace' if low | length > 0 else 'ok' }}
+    json_attributes:
+      - filter
+      - main_brush
+      - side_brush
+      - mop
+      - sensor
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum DND
+    resource: "http://192.168.1.31:6971/dnd"
+    value_template: "{{ value_json.enabled }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Carpet Mode
+    resource: "http://192.168.1.31:6971/carpet_mode"
+    value_template: "{{ value_json.mode }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Obstacle Images
+    resource: "http://192.168.1.31:6971/obstacle_images"
+    value_template: "{{ value_json.enabled }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Obstacle Avoidance
+    resource: "http://192.168.1.31:6971/obstacle_avoidance"
+    value_template: "{{ value_json.enabled }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Child Lock
+    resource: "http://192.168.1.31:6971/child_lock"
+    value_template: "{{ value_json.enabled }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Auto Empty Interval
+    resource: "http://192.168.1.31:6971/auto_empty_interval"
+    value_template: "{{ value_json.interval }}"
+    scan_interval: 300
+
+  - platform: rest
+    name: Vacuum Drive Speed
+    resource: "http://192.168.1.31:6971/drive/speed"
+    value_template: "{{ value_json.speed }}"
+    scan_interval: 60
+
+  # Quirk sensors (one per configurable quirk)
+  - platform: rest
+    name: Vacuum Carpet Sensitivity
+    resource: "http://192.168.1.31:6971/quirk/f8cb91ab-a47a-445f-b300-0aac0d4937c0"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
+  - platform: rest
+    name: Vacuum Mop Clean Frequency
+    resource: "http://192.168.1.31:6971/quirk/a6709b18-57af-4e11-8b4c-8ae33147ab34"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
+  - platform: rest
+    name: Vacuum Mop Wash Intensity
+    resource: "http://192.168.1.31:6971/quirk/2d4ce805-ebf7-4dcf-b919-c5fe4d4f2de3"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
+  - platform: rest
+    name: Vacuum Pre Wet Mops
+    resource: "http://192.168.1.31:6971/quirk/66adac0f-0a16-4049-b6ac-080ef702bb39"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
+  - platform: rest
+    name: Vacuum Detergent
+    resource: "http://192.168.1.31:6971/quirk/a2a03d42-c710-45e5-b53a-4bc62778589f"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
+  - platform: rest
+    name: Vacuum Carpet First
+    resource: "http://192.168.1.31:6971/quirk/3d6cd658-c72a-48d9-ba54-38cf2d26e2f6"
+    value_template: "{{ value_json.value }}"
+    scan_interval: 3600
+
 # Input controls
 input_number:
   vacuum_speaker_volume:
@@ -417,6 +585,81 @@ input_select:
       - low
       - high
     icon: mdi:video
+
+  vacuum_carpet_mode:
+    name: Vacuum Carpet Mode
+    options:
+      - avoid
+      - lift
+      - ignore
+    icon: mdi:rug
+
+  vacuum_auto_empty_interval:
+    name: Vacuum Auto Empty Interval
+    options:
+      - not_set
+      - low
+      - moderate
+      - frequent
+      - every_time
+    icon: mdi:delete-empty
+
+  vacuum_carpet_sensitivity:
+    name: Vacuum Carpet Sensitivity
+    options:
+      - low
+      - medium
+      - high
+    icon: mdi:signal-cellular-3
+
+  vacuum_mop_clean_frequency:
+    name: Vacuum Mop Clean Frequency
+    options:
+      - every_segment
+      - every_5_m2
+      - every_10_m2
+      - every_15_m2
+      - every_20_m2
+      - every_25_m2
+    icon: mdi:refresh
+
+  vacuum_mop_wash_intensity:
+    name: Vacuum Mop Wash Intensity
+    options:
+      - low
+      - medium
+      - high
+    icon: mdi:water-pump
+
+  vacuum_pre_wet_mops:
+    name: Vacuum Pre-Wet Mops
+    options:
+      - Wet
+      - Dry
+    icon: mdi:water-outline
+
+  vacuum_detergent:
+    name: Vacuum Detergent
+    options:
+      - "on"
+      - "off"
+    icon: mdi:bottle-tonic
+
+  vacuum_carpet_first:
+    name: Vacuum Carpet First
+    options:
+      - "on"
+      - "off"
+    icon: mdi:sort-ascending
+
+input_number:
+  vacuum_drive_speed:
+    name: Vacuum Drive Speed
+    min: 0
+    max: 100
+    step: 5
+    icon: mdi:speedometer
+    unit_of_measurement: "%"
 
 # Scripts
 script:
@@ -517,7 +760,80 @@ Create the following automations (via the HA UI or `automations.yaml`):
     - action: rest_command.vacuum_set_video_quality
       data:
         profile: "{{ states('input_select.vacuum_video_quality') }}"
+
+- alias: Vacuum Carpet Mode Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_carpet_mode
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_carpet_mode
+      data:
+        mode: "{{ states('input_select.vacuum_carpet_mode') }}"
+
+- alias: Vacuum Auto Empty Interval Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_auto_empty_interval
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_auto_empty_interval
+      data:
+        interval: "{{ states('input_select.vacuum_auto_empty_interval') }}"
+
+- alias: Vacuum Drive Speed Changed
+  trigger:
+    - platform: state
+      entity_id: input_number.vacuum_drive_speed
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] }}"
+  action:
+    - action: rest_command.vacuum_set_drive_speed
+      data:
+        speed: "{{ states('input_number.vacuum_drive_speed') | int }}"
 ```
+
+**Quirk sync automations** (one per configurable quirk — carpet sensitivity shown as example):
+
+```yaml
+- alias: Vacuum Carpet Sensitivity Changed
+  trigger:
+    - platform: state
+      entity_id: input_select.vacuum_carpet_sensitivity
+  condition:
+    - condition: template
+      value_template: "{{ trigger.from_state.state not in ['unknown', 'unavailable'] and trigger.from_state.state != trigger.to_state.state }}"
+  action:
+    - action: rest_command.vacuum_set_quirk
+      data:
+        quirk_id: "f8cb91ab-a47a-445f-b300-0aac0d4937c0"
+        value: "{{ states('input_select.vacuum_carpet_sensitivity') }}"
+```
+
+Repeat the same pattern for each quirk with the corresponding UUID:
+
+| Quirk | UUID | Options |
+|---|---|---|
+| Carpet Sensitivity | `f8cb91ab-a47a-445f-b300-0aac0d4937c0` | low, medium, high |
+| Mop Clean Frequency | `a6709b18-57af-4e11-8b4c-8ae33147ab34` | every_segment, every_5_m2…every_25_m2 |
+| Mop Wash Intensity | `2d4ce805-ebf7-4dcf-b919-c5fe4d4f2de3` | low, medium, high |
+| Pre-Wet Mops | `66adac0f-0a16-4049-b6ac-080ef702bb39` | Wet, Dry |
+| Detergent | `a2a03d42-c710-45e5-b53a-4bc62778589f` | on, off |
+| Carpet First | `3d6cd658-c72a-48d9-ba54-38cf2d26e2f6` | on, off |
+
+**Dock action quirks** (trigger-only, no sync needed):
+
+| Action | UUID |
+|---|---|
+| Auto Repair | `ae753798-aa4f-4b35-a60c-91e7e5ae76f3` |
+| Drain Water Tank | `3e1b0851-3a5a-4943-bea6-dea3d7284bff` |
+| Dock Cleaning Process | `42c7db4b-2cad-4801-a526-44de8944a41f` |
+| Water Hookup Test | `86094736-d66e-40c3-807c-3f5ef33cbf09` |
 
 **Sync vacuum → sliders/selectors on startup:**
 
@@ -559,6 +875,59 @@ Create the following automations (via the HA UI or `automations.yaml`):
         entity_id: input_select.vacuum_video_quality
       data:
         option: "{{ states('sensor.vacuum_video_quality') }}"
+
+- alias: Vacuum New Controls Sync on Startup
+  trigger:
+    - platform: homeassistant
+      event: start
+  action:
+    - delay:
+        seconds: 90
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_carpet_mode
+      data:
+        option: "{{ states('sensor.vacuum_carpet_mode') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_auto_empty_interval
+      data:
+        option: "{{ states('sensor.vacuum_auto_empty_interval') }}"
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.vacuum_drive_speed
+      data:
+        value: "{{ states('sensor.vacuum_drive_speed') | int(50) }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_carpet_sensitivity
+      data:
+        option: "{{ states('sensor.vacuum_carpet_sensitivity') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_mop_clean_frequency
+      data:
+        option: "{{ states('sensor.vacuum_mop_clean_frequency') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_mop_wash_intensity
+      data:
+        option: "{{ states('sensor.vacuum_mop_wash_intensity') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_pre_wet_mops
+      data:
+        option: "{{ states('sensor.vacuum_pre_wet_mops') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_detergent
+      data:
+        option: "{{ states('sensor.vacuum_detergent') }}"
+    - action: input_select.select_option
+      target:
+        entity_id: input_select.vacuum_carpet_first
+      data:
+        option: "{{ states('sensor.vacuum_carpet_first') }}"
 ```
 
 ### Dashboard Card
@@ -769,6 +1138,72 @@ script:
         data:
           velocity: "0"
           angle: "-90"
+
+  # --- Feature Toggle Scripts ---
+  vacuum_toggle_obstacle_avoidance:
+    alias: Vacuum Toggle Obstacle Avoidance
+    sequence:
+      - action: homeassistant.update_entity
+        target:
+          entity_id: sensor.vacuum_obstacle_avoidance
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: sensor.vacuum_obstacle_avoidance
+                state: "True"
+            sequence:
+              - action: rest_command.vacuum_toggle_obstacle_avoidance
+          - conditions:
+              - condition: state
+                entity_id: sensor.vacuum_obstacle_avoidance
+                state: "False"
+            sequence:
+              - action: rest_command.vacuum_toggle_obstacle_avoidance
+
+  vacuum_toggle_obstacle_images:
+    alias: Vacuum Toggle Obstacle Images
+    # Same pattern as above with sensor.vacuum_obstacle_images
+
+  vacuum_toggle_child_lock:
+    alias: Vacuum Toggle Child Lock
+    # Same pattern as above with sensor.vacuum_child_lock
+
+  # --- Dock Action Scripts ---
+  vacuum_dock_auto_repair:
+    alias: Vacuum Dock Auto Repair
+    icon: mdi:wrench
+    sequence:
+      - action: rest_command.vacuum_set_quirk
+        data:
+          quirk_id: "ae753798-aa4f-4b35-a60c-91e7e5ae76f3"
+          value: "action"
+
+  vacuum_drain_water_tank:
+    alias: Vacuum Drain Water Tank
+    icon: mdi:water-off
+    sequence:
+      - action: rest_command.vacuum_set_quirk
+        data:
+          quirk_id: "3e1b0851-3a5a-4943-bea6-dea3d7284bff"
+          value: "action"
+
+  vacuum_dock_cleaning_process:
+    alias: Vacuum Dock Cleaning Process
+    icon: mdi:broom
+    sequence:
+      - action: rest_command.vacuum_set_quirk
+        data:
+          quirk_id: "42c7db4b-2cad-4801-a526-44de8944a41f"
+          value: "action"
+
+  vacuum_water_hookup_test:
+    alias: Vacuum Water Hookup Test
+    icon: mdi:pipe
+    sequence:
+      - action: rest_command.vacuum_set_quirk
+        data:
+          quirk_id: "86094736-d66e-40c3-807c-3f5ef33cbf09"
+          value: "action"
 ```
 
 The card provides:
@@ -777,8 +1212,14 @@ The card provides:
 - **Two-way audio** — click the microphone button to talk through the vacuum speaker
 - **Status bar** showing current status, battery level, and operation mode
 - **Action buttons** — Start, Pause, Stop, Home
-- **D-pad controls** — manual drive with Forward/Back/Left/Right and Enable button
-- **Mode selectors** — operation mode, fan speed, water usage dropdowns
+- **D-pad controls** — manual drive with Forward/Back/Left/Right, Enable button, and speed slider
+- **Mode selectors** — operation mode, fan speed, water usage, carpet mode, auto-empty interval dropdowns
+- **Feature toggles** — obstacle avoidance, obstacle images, child lock toggle buttons
+- **Feature status** — glance card showing DND, carpet mode, obstacle avoidance, child lock, auto-empty states
+- **Cleaning quirks** — carpet sensitivity, mop frequency, wash intensity, pre-wet mops, detergent, carpet-first selectors
+- **Dock actions** — dock auto-repair, drain tank, dock cleaning, water hookup test buttons
+- **Statistics** — cleaning area, time, and run count
+- **Consumable status** — filter, brushes, mops, sensor wear levels
 - **Volume sliders** for speaker and microphone
 - **TTS text box** with a Speak button
 - **Quick actions** — Locate and Say Hello buttons
@@ -791,7 +1232,7 @@ The card provides:
 | `vacuumstreamer.so` | Compiled shared library (aarch64) |
 | `go2rtc.yaml` | go2rtc configuration — streams, RTSP, WebRTC, backchannel |
 | `play_pcm.sh` | WebRTC backchannel handler — pipes PCM audio to `aplay` |
-| `tts_handler.sh` | HTTP server handler for TTS, audio playback, volume control, video quality switching, and Valetudo API proxy (vacuum controls, manual drive, mode/speed/water, room cleaning) |
+| `tts_handler.sh` | HTTP server handler for TTS, audio playback, volume control, video quality switching, Valetudo API proxy (vacuum controls, manual drive, mode/speed/water, room cleaning), feature controls (DND, carpet mode, obstacle avoidance, child lock, auto-empty), statistics, consumables, drive speed, and quirk settings |
 | `_root_postboot.sh` | Boot script — starts Valetudo, ALSA mixer setup, video_monitor, go2rtc, TTS server |
 | `Dockerfile` | Build environment for cross-compiling vacuumstreamer.so |
 | `run.sh` | Docker wrapper for running make |
